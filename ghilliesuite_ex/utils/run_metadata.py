@@ -8,14 +8,27 @@ completed runs without storing cookies, tokens, or raw request evidence.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
+from uuid import uuid4
+
+from ghilliesuite_ex.utils.redaction import redact_text
 
 
 def safe_run_slug(target: str, started_at: datetime) -> str:
-    safe_target = (target or "target").replace(".", "_").replace("/", "_").replace(":", "")
-    return f"{safe_target}_{started_at.strftime('%Y%m%d_%H%M%S')}"
+    raw = (target or "target").strip()
+    try:
+        parsed = urlsplit(raw if "://" in raw else f"//{raw}")
+        host = parsed.hostname or "target"
+        port = f"{parsed.port}" if parsed.port else ""
+        prefix = f"{parsed.scheme}__" if parsed.scheme else ""
+    except ValueError:
+        host, port, prefix = "target", "", ""
+    safe_target = re.sub(r"[^A-Za-z0-9_-]+", "_", f"{prefix}{host}{port}")[:80].strip("_") or "target"
+    return f"{safe_target}_{started_at.strftime('%Y%m%d_%H%M%S_%f')}_{uuid4().hex[:8]}"
 
 
 def build_run_manifest(
@@ -75,12 +88,31 @@ def build_run_manifest(
             "This manifest intentionally excludes cookies, auth headers, and raw HTTP evidence.",
         ],
     }
-    return manifest
+    return _redact_manifest(manifest)
+
+
+def _redact_manifest(value: Any) -> Any:
+    if isinstance(value, str):
+        return redact_text(value)
+    if isinstance(value, list):
+        return [_redact_manifest(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _redact_manifest(item) for key, item in value.items()}
+    return value
 
 
 def write_run_manifest(output_dir: str | Path, run_slug: str, manifest: dict[str, Any]) -> Path:
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    manifest_path = output_path / f"{run_slug}_run.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-    return manifest_path
+    safe_slug = re.sub(r"[^A-Za-z0-9_-]+", "_", run_slug).strip("_")[:160] or "run"
+    payload = json.dumps(_redact_manifest(manifest), indent=2)
+    for suffix in range(1000):
+        name = f"{safe_slug}_run.json" if suffix == 0 else f"{safe_slug}_{suffix}_run.json"
+        manifest_path = output_path / name
+        try:
+            with manifest_path.open("x", encoding="utf-8") as file:
+                file.write(payload)
+            return manifest_path
+        except FileExistsError:
+            continue
+    raise FileExistsError("Could not allocate a unique run manifest path")

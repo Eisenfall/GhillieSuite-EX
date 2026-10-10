@@ -114,10 +114,12 @@ class SupervisorAgent(BaseAgent):
                  style="bright_magenta")
         )
 
-        total_findings = 0
-        last_hosts = -1
-        last_endpoints = -1
-        last_params = -1
+        def in_scope_findings(findings):
+            return [finding for finding in findings if is_in_scope(finding.target, self.scope)]
+
+        initial_findings = len(in_scope_findings(await self.db.get_findings()))
+        failures: list[str] = []
+        last_snapshot: tuple[int, int, int, int] | None = None
         # RC7: require 2 consecutive stable iterations before early exit.
         # Previously the loop stopped after 1 stable recon run, which often meant
         # exploit had not yet had a full pass. stable_streak ensures exploit
@@ -127,19 +129,19 @@ class SupervisorAgent(BaseAgent):
 
         for loop_idx in range(1, self.max_loops + 1):
             agent_panel(self.console, "ReconAgent", "subfinder, dnsx, naabu, httpx, katana, gau, arjun", target, loop_idx, self.max_loops)
-            res_recon = await self.recon_agent.run(AgentTask(target=target, safe_mode=self.safe_mode))
-            total_findings += res_recon.items_added if res_recon.status == "ok" else 0
+            try:
+                res_recon = await self.recon_agent.run(AgentTask(target=target, safe_mode=self.safe_mode))
+            except Exception as exc:
+                res_recon = AgentResult("ReconAgent", "error", f"Recon failed: {exc}", error=str(exc))
+            if res_recon.status == "error":
+                failures.append(f"recon: {res_recon.error or res_recon.summary}")
             self.console.print(f"[dim]  -> ReconAgent: {res_recon.summary}[/dim]")
 
             hosts = await self.db.get_hosts(self.scope)
-            endpoints = await self.db.get_endpoints()
+            endpoints = [ep for ep in await self.db.get_endpoints() if is_in_scope(ep.url, self.scope)]
             endpoints_with_params = sum(1 for e in endpoints if e.params)
-            status_dashboard(self.console, len(hosts), len(endpoints), len(await self.db.get_findings()), endpoints_with_params)
-
-            recon_stable = (len(hosts) == last_hosts and len(endpoints) == last_endpoints)
-            last_hosts = len(hosts)
-            last_endpoints = len(endpoints)
-            last_params = endpoints_with_params
+            finding_count = len(in_scope_findings(await self.db.get_findings()))
+            status_dashboard(self.console, len(hosts), len(endpoints), finding_count, endpoints_with_params)
 
             if endpoints:
                 tool_override = None
@@ -154,34 +156,54 @@ class SupervisorAgent(BaseAgent):
                     loop_idx,
                     self.max_loops,
                 )
-                res_exploit = await self.exploit_agent.run(
-                    AgentTask(target=target, safe_mode=self.safe_mode, tool_name=tool_override, reason=reason)
-                )
-                total_findings += res_exploit.items_added if res_exploit.status == "ok" else 0
+                try:
+                    res_exploit = await self.exploit_agent.run(
+                        AgentTask(target=target, safe_mode=self.safe_mode, tool_name=tool_override, reason=reason)
+                    )
+                except Exception as exc:
+                    res_exploit = AgentResult("ExploitAgent", "error", f"Exploit failed: {exc}", error=str(exc))
+                if res_exploit.status == "error":
+                    failures.append(f"exploit: {res_exploit.error or res_exploit.summary}")
                 self.console.print(f"[dim]  -> ExploitAgent: {res_exploit.summary}[/dim]")
-                exploit_ran = True
+                exploit_ran = res_exploit.status in {"ok", "skipped"}
 
-            # RC7: increment streak only when recon is stable; reset on new data.
-            if recon_stable:
+            finding_count = len(in_scope_findings(await self.db.get_findings()))
+            snapshot = (len(hosts), len(endpoints), endpoints_with_params, finding_count)
+            stable_now = snapshot == last_snapshot and res_recon.status != "error"
+            if stable_now and (not endpoints or exploit_ran):
                 stable_streak += 1
             else:
                 stable_streak = 0
+            last_snapshot = snapshot
 
             # Exit only after 2 consecutive stable iterations AND exploit has run at least once.
-            if stable_streak >= 2 and exploit_ran:
+            if stable_streak >= 2 and exploit_ran and not failures:
                 self.console.print("[dim]Recon stable for 2 iterations and exploit complete. Exiting loop.[/dim]")
                 break
-            elif recon_stable and not exploit_ran:
+            elif stable_now and not exploit_ran:
                 self.console.print("[dim]Recon stable but exploit has not run yet -- continuing.[/dim]")
 
         self.console.print(Rule("[bold bright_green]Compiling Report[/bold bright_green]", style="bright_green"))
-        await self.reporter_agent.run(AgentTask(target=target))
+        try:
+            report_result = await self.reporter_agent.run(AgentTask(target=target))
+        except Exception as exc:
+            report_result = AgentResult("ReporterAgent", "error", f"Report failed: {exc}", error=str(exc))
+        if report_result.status == "error":
+            failures.append(f"reporter: {report_result.error or report_result.summary}")
+
+        finding_count = len(in_scope_findings(await self.db.get_findings()))
+        unique_failures = list(dict.fromkeys(failures))
+        failure_note = f" Failed stages: {'; '.join(unique_failures)}." if unique_failures else ""
+        close_exploit = getattr(self.exploit_agent, "close", None)
+        if callable(close_exploit):
+            close_exploit()
 
         return AgentResult(
             agent=self.name,
-            status="ok",
-            summary=f"Rules-first pipeline complete. {total_findings} finding(s) stored.",
-            items_added=total_findings,
+            status="error" if unique_failures else "ok",
+            summary=f"Rules-first pipeline complete. {finding_count} finding(s) stored.{failure_note}",
+            items_added=max(0, finding_count - initial_findings),
+            error="; ".join(unique_failures),
         )
 
     async def _ai_advisory_tool_choice(self) -> tuple[str | None, str]:

@@ -58,12 +58,13 @@ CREATE TABLE IF NOT EXISTS services (
 
 CREATE TABLE IF NOT EXISTS endpoints (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    url         TEXT    NOT NULL UNIQUE,
+    url         TEXT    NOT NULL,
     method      TEXT    DEFAULT 'GET',
     params      TEXT    DEFAULT '',
     source_tool TEXT    DEFAULT '',
     host_id     INTEGER REFERENCES hosts(id),
-    found_at    TEXT    NOT NULL
+    found_at    TEXT    NOT NULL,
+    UNIQUE(url, method)
 );
 
 CREATE TABLE IF NOT EXISTS screenshots (
@@ -105,6 +106,12 @@ CREATE TABLE IF NOT EXISTS cve_cache (
 _DATA_TABLES = ["findings", "endpoints", "services", "screenshots", "hosts", "cve_cache"]
 
 
+def _merge_endpoint_params(*values: str) -> str:
+    return ",".join(sorted({
+        name.strip() for value in values for name in (value or "").split(",") if name.strip()
+    }))
+
+
 class StateDB:
     """
     Async context manager wrapping aiosqlite.
@@ -131,6 +138,7 @@ class StateDB:
         self._conn = await aiosqlite.connect(self._path)
         self._conn.row_factory = aiosqlite.Row
         await self._conn.executescript(SCHEMA_SQL)
+        await self._migrate_endpoint_schema()
         await self._conn.commit()
 
         # ── Target-change detection ───────────────────────────────────────────
@@ -156,6 +164,38 @@ class StateDB:
     def target_session(self) -> TargetSession:
         """Return target-isolation metadata for the current DB context."""
         return self._target_session
+
+    async def _migrate_endpoint_schema(self) -> None:
+        """Replace the legacy URL-only unique key while keeping existing endpoint IDs."""
+        indexes = await (await self._db.execute("PRAGMA index_list('endpoints')")).fetchall()
+        legacy_key = False
+        for index in indexes:
+            if not index["unique"]:
+                continue
+            columns = await (await self._db.execute(
+                f"PRAGMA index_info('{index['name']}')"
+            )).fetchall()
+            if [column["name"] for column in columns] == ["url"]:
+                legacy_key = True
+                break
+        if not legacy_key:
+            return
+        await self._db.executescript("""
+            CREATE TABLE endpoints_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                url TEXT NOT NULL,
+                method TEXT DEFAULT 'GET',
+                params TEXT DEFAULT '',
+                source_tool TEXT DEFAULT '',
+                host_id INTEGER REFERENCES hosts(id),
+                found_at TEXT NOT NULL,
+                UNIQUE(url, method)
+            );
+            INSERT INTO endpoints_new (id, url, method, params, source_tool, host_id, found_at)
+                SELECT id, url, method, params, source_tool, host_id, found_at FROM endpoints;
+            DROP TABLE endpoints;
+            ALTER TABLE endpoints_new RENAME TO endpoints;
+        """)
 
     async def _ensure_target_session(self) -> TargetSession:
         """
@@ -216,7 +256,7 @@ class StateDB:
         )
         await self._db.commit()
         # If ignored (duplicate), fetch the existing id
-        if cursor.lastrowid == 0:
+        if cursor.rowcount == 0:
             row = await self._db.execute("SELECT id FROM hosts WHERE domain = ?", (host.domain,))
             result = await row.fetchone()
             return result["id"] if result else 0
@@ -308,6 +348,12 @@ class StateDB:
             ),
         )
         await self._db.commit()
+        if cursor.rowcount == 0:
+            row = await (await self._db.execute(
+                "SELECT id FROM services WHERE host_id = ? AND port = ? AND proto = ?",
+                (service.host_id, service.port, service.proto),
+            )).fetchone()
+            return row["id"] if row else 0
         return cursor.lastrowid or 0  # type: ignore[return-value]
 
     async def get_services(self, host_id: int | None = None) -> list[Service]:
@@ -333,34 +379,41 @@ class StateDB:
     # ── Endpoints ─────────────────────────────────────────────────────────────
 
     async def insert_endpoint(self, ep: Endpoint) -> int:
+        method = (ep.method or "GET").upper()
         cursor = await self._db.execute(
             """
             INSERT OR IGNORE INTO endpoints (url, method, params, source_tool, host_id, found_at)
             VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (ep.url, ep.method, ep.params, ep.source_tool, ep.host_id, ep.found_at),
+            (ep.url, method, ep.params, ep.source_tool, ep.host_id, ep.found_at),
         )
+        if cursor.rowcount == 0:
+            row = await (await self._db.execute(
+                "SELECT id, params FROM endpoints WHERE url = ? AND method = ?", (ep.url, method),
+            )).fetchone()
+            if row:
+                merged = _merge_endpoint_params(row["params"], ep.params)
+                await self._db.execute(
+                    "UPDATE endpoints SET params = ?, host_id = COALESCE(host_id, ?) WHERE id = ?",
+                    (merged, ep.host_id, row["id"]),
+                )
+                await self._db.commit()
+            return row["id"] if row else 0
         await self._db.commit()
         return cursor.lastrowid or 0  # type: ignore[return-value]
 
     async def update_endpoint_params(self, url: str, params: str) -> None:
         """Update params for an existing endpoint, merging with any current params."""
-        row = await (
-            await self._db.execute("SELECT params FROM endpoints WHERE url = ?", (url,))
-        ).fetchone()
-        if not row:
+        rows = await (
+            await self._db.execute("SELECT id, params FROM endpoints WHERE url = ?", (url,))
+        ).fetchall()
+        if not rows:
             return
-        current = row["params"] or ""
-        if not current:
-            merged = params
-        else:
-            current_set = {p.strip() for p in current.split(",") if p.strip()}
-            new_set = {p.strip() for p in params.split(",") if p.strip()}
-            merged = ",".join(sorted(current_set.union(new_set)))
-        await self._db.execute(
-            "UPDATE endpoints SET params = ? WHERE url = ?",
-            (merged, url),
-        )
+        for row in rows:
+            await self._db.execute(
+                "UPDATE endpoints SET params = ? WHERE id = ?",
+                (_merge_endpoint_params(row["params"], params), row["id"]),
+            )
         await self._db.commit()
 
     async def get_endpoints(
@@ -413,6 +466,12 @@ class StateDB:
             ),
         )
         await self._db.commit()
+        if cursor.rowcount == 0:
+            row = await (await self._db.execute(
+                "SELECT id FROM screenshots WHERE url = ? AND path = ?",
+                (shot.url, shot.path),
+            )).fetchone()
+            return row["id"] if row else 0
         return cursor.lastrowid or 0  # type: ignore[return-value]
 
     async def get_screenshots(self) -> list[Screenshot]:

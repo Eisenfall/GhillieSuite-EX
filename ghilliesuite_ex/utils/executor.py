@@ -52,12 +52,12 @@ def _build_tool_env() -> dict[str, str]:
     ]
 
     current_path = env.get("PATH", "")
-    extra = ":".join(
+    extra = os.pathsep.join(
         str(p) for p in go_bin_candidates
         if p.is_dir() and str(p) not in current_path
     )
     if extra:
-        env["PATH"] = extra + ":" + current_path
+        env["PATH"] = extra + os.pathsep + current_path
 
     return env
 
@@ -83,6 +83,30 @@ def _get_cooldown_lock() -> asyncio.Lock:
 
 
 MAX_OUTPUT_BYTES = 512 * 1024  # 512 KB cap on raw stdout
+
+
+async def _bounded_communicate(proc, stdin_data: bytes | None = None) -> tuple[bytes, bytes]:
+    """Drain both pipes to EOF while retaining only the first output window."""
+    if getattr(proc, "stdout", None) is None or getattr(proc, "stderr", None) is None:
+        return await proc.communicate(input=stdin_data) if stdin_data is not None else await proc.communicate()
+
+    if stdin_data is not None and proc.stdin is not None:
+        proc.stdin.write(stdin_data)
+        await proc.stdin.drain()
+        proc.stdin.close()
+
+    async def _drain(stream) -> bytes:
+        retained = bytearray()
+        while chunk := await stream.read(65536):
+            remaining = MAX_OUTPUT_BYTES - len(retained)
+            if remaining > 0:
+                retained.extend(chunk[:remaining])
+        return bytes(retained)
+
+    stdout, stderr, _ = await asyncio.gather(
+        _drain(proc.stdout), _drain(proc.stderr), proc.wait(),
+    )
+    return stdout, stderr
 
 
 @dataclass
@@ -154,12 +178,12 @@ async def run_tool(
 
         try:
             stdout_raw, stderr_raw = await asyncio.wait_for(
-                proc.communicate(input=stdin_bytes),
+                _bounded_communicate(proc, stdin_bytes),
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
             proc.kill()
-            await proc.communicate()
+            await _bounded_communicate(proc)
             return ToolResult(
                 stdout="",
                 stderr="",
@@ -266,12 +290,12 @@ async def run_tool_to_file(
 
         try:
             stdout_raw, stderr_raw = await asyncio.wait_for(
-                proc.communicate(),
+                _bounded_communicate(proc),
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
             proc.kill()
-            await proc.communicate()
+            await _bounded_communicate(proc)
             return ToolResult(
                 stdout="",
                 stderr="",

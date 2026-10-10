@@ -183,6 +183,13 @@ Important:
 
 Safety policy is centralized in `ghilliesuite_ex/safety.py`.
 
+Scope and scanner behavior:
+
+- Automatic redirect following is disabled. The `--allow-redirects` flag is retained for CLI compatibility but does not enable redirects.
+- URL path rules restrict the crawler and scanners that cannot guarantee path containment. Those stages are skipped for path-restricted scopes; direct probes still check each URL against scope.
+- Nuclei uses the templates installed with Nuclei. Files under `ghilliesuite_ex/templates/` are packaged examples and are not automatically included in hunts.
+- An SSRF-prone parameter name is reported as an unverified informational lead. Cloud metadata responses require evidence beyond an echoed payload before a confirmed label is used.
+
 ## Reports and Artifacts
 
 By default, reports are written to `reports/` and evidence files to `evidence/`.
@@ -229,6 +236,8 @@ python -m unittest discover -s tests -v
 ```
 
 The project keeps the suite in `unittest` style. `pytest` can still be used as a wrapper if installed, but `unittest discover` is the baseline command that the repository is aligned around.
+
+The suite mocks external scanners and HTTP calls. Passing tests verify local control flow; a live hunt also depends on the installed scanner versions and target behavior.
 
 ## Main Commands
 

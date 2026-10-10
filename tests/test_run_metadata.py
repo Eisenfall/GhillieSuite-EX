@@ -16,7 +16,13 @@ class TestRunMetadata(unittest.TestCase):
     def test_safe_run_slug_normalizes_target(self) -> None:
         started_at = datetime(2026, 5, 14, 12, 30, 45, tzinfo=timezone.utc)
         slug = safe_run_slug("https://app.example.com:8443", started_at)
-        self.assertEqual(slug, "https__app_example_com8443_20260514_123045")
+        self.assertTrue(slug.startswith("https__app_example_com8443_20260514_123045_000000_"))
+
+    def test_safe_run_slug_handles_invalid_port_without_leaking_query(self) -> None:
+        started_at = datetime(2026, 5, 14, 12, 30, 45, tzinfo=timezone.utc)
+        slug = safe_run_slug("https://example.com:bad/?token=secret123", started_at)
+        self.assertTrue(slug.startswith("target_"))
+        self.assertNotIn("secret123", slug)
 
     def test_build_run_manifest_excludes_sensitive_runtime_fields(self) -> None:
         started_at = datetime(2026, 5, 14, 12, 0, 0, tzinfo=timezone.utc)

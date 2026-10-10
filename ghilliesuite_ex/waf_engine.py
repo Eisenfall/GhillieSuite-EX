@@ -453,31 +453,11 @@ async def verify_bypass(
     try:
         from ghilliesuite_ex.agents.base import _run_in_thread
         import asyncio
-        import random
 
         import urllib3
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         
         def _do_request():
-            # Advanced Header Rotation for modern WAF evasion
-            from ghilliesuite_ex.agents.recon import _USER_AGENTS
-            ua = random.choice(_USER_AGENTS)
-            headers = {
-                "User-Agent": ua,
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Sec-Ch-Ua": '"Not A(Brand";v="99", "Google Chrome";v="121", "Chromium";v="121"',
-                "Sec-Ch-Ua-Mobile": "?0",
-                "Sec-Ch-Ua-Platform": '"Windows"',
-                "Sec-Fetch-Dest": "document",
-                "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-Site": "none",
-                "Sec-Fetch-User": "?1",
-                "Upgrade-Insecure-Requests": "1"
-            }
-            if auth_headers:
-                headers.update(auth_headers)
-
             if use_curl:
                 try:
                     session = _requests.Session(impersonate="chrome120", verify=False)
@@ -487,7 +467,7 @@ async def verify_bypass(
                     return session.get(
                         injected_url,
                         timeout=timeout,
-                        allow_redirects=True,
+                        allow_redirects=False,
                         headers=headers
                     )
             else:
@@ -497,7 +477,7 @@ async def verify_bypass(
                     return session.get(
                         injected_url,
                         timeout=timeout,
-                        follow_redirects=True,
+                        follow_redirects=False,
                         headers=headers
                     )
 
@@ -520,7 +500,7 @@ async def verify_bypass(
     challenge_keywords = ["verifying your connection", "cloudflare-nginx", "just a moment", "attention required"]
     has_challenge = any(kw in body_lower for kw in challenge_keywords)
 
-    if resp.status_code in {403, 429} or has_challenge:
+    if 300 <= resp.status_code < 400 or resp.status_code in {403, 429} or has_challenge:
         success = False
     else:
         status_changed = resp.status_code != baseline_status and resp.status_code not in _WAF_BLOCK_CODES

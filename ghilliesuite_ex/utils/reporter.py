@@ -3,7 +3,7 @@ ghilliesuite_ex/utils/reporter.py
 ─────────────────────────────────
 HTML Report Generator for GhillieSuite-EX.
 
-Produces a single self-contained .html file using Tailwind CSS (CDN) with:
+Produces a single self-contained .html file with:
   • Executive summary dashboard (counts, severity donut)
   • Per-finding cards with AI-generated plain-English explanations
   • Collapsible technical evidence / reproducible steps sections
@@ -27,6 +27,7 @@ import asyncio
 import base64
 import html as _html
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,8 @@ from ghilliesuite_ex.config import Config, cfg as global_cfg
 from ghilliesuite_ex.state.db import StateDB
 from ghilliesuite_ex.state.models import Finding, Host, Endpoint, Screenshot
 from ghilliesuite_ex.utils.redaction import redact_text
+from ghilliesuite_ex.utils.run_metadata import safe_run_slug
+from ghilliesuite_ex.utils.scope import is_in_scope
 
 
 # ── Severity metadata ─────────────────────────────────────────────────────────────────────
@@ -130,11 +133,36 @@ def _image_data_uri(path: str) -> str:
 
 
 def serialize_scope(scope: Any) -> dict[str, Any] | list[str] | str:
+    def redact_value(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {key: redact_value(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [redact_value(item) for item in value]
+        if isinstance(value, str):
+            return redact_text(value)
+        return value
+
     if hasattr(scope, "to_dict"):
-        return scope.to_dict()
+        return redact_value(scope.to_dict())
     if isinstance(scope, (list, tuple)):
-        return [str(item) for item in scope]
-    return _safe_text(scope)
+        return [_report_safe_text(item) for item in scope]
+    return _report_safe_text(scope)
+
+
+def filter_report_records(
+    scope: Any,
+    findings: list[Finding],
+    hosts: list[Host],
+    endpoints: list[Endpoint],
+    screenshots: list[Screenshot],
+) -> tuple[list[Finding], list[Host], list[Endpoint], list[Screenshot]]:
+    """Limit reused DB records to the scope of this report run."""
+    return (
+        [f for f in findings if is_in_scope(f.target, scope)],
+        [h for h in hosts if is_in_scope(h.domain, scope)],
+        [e for e in endpoints if is_in_scope(e.url, scope)],
+        [s for s in screenshots if is_in_scope(s.url, scope)],
+    )
 
 
 def build_report_data(
@@ -152,14 +180,14 @@ def build_report_data(
     ai_status = getattr(config, "ai_status_message", "AI triage disabled")
     ai_reason = getattr(config, "ai_disabled_reason", "")
     return {
-        "target": target,
+        "target": _report_safe_text(target),
         "generated_at": generated_at,
         "scope": serialize_scope(scope),
         "scan_config": {
             "ai_triage": {
                 "enabled": ai_available,
-                "status": ai_status,
-                "reason": ai_reason,
+                "status": _report_safe_text(ai_status),
+                "reason": _report_safe_text(ai_reason),
             },
             "js_deep_inspection": {
                 "js_max_workers": config.js_max_workers,
@@ -188,17 +216,17 @@ def build_report_data(
                 "reproducible_steps": _report_safe_text(finding.reproducible_steps),
                 "raw_output_excerpt": _report_safe_text(finding.raw_output)[:500],
                 "timestamp": _report_safe_text(finding.timestamp),
-                "evidence_request_path": _extract_evidence_paths(finding.evidence)[0],
-                "evidence_response_path": _extract_evidence_paths(finding.evidence)[1],
+                "evidence_request_path": _report_safe_text(_extract_evidence_paths(finding.evidence)[0]),
+                "evidence_response_path": _report_safe_text(_extract_evidence_paths(finding.evidence)[1]),
             }
             for finding in findings
         ],
         "hosts": [
-            {"domain": host.domain, "status_code": host.status_code, "tech_stack": host.tech_stack}
+            {"domain": _report_safe_text(host.domain), "status_code": host.status_code, "tech_stack": _report_safe_text(host.tech_stack)}
             for host in hosts
         ],
         "screenshots": [
-            {"url": shot.url, "path": shot.path, "title": shot.title, "status": shot.status}
+            {"url": _report_safe_text(shot.url), "path": _report_safe_text(shot.path), "title": _report_safe_text(shot.title), "status": shot.status}
             for shot in screenshots
         ],
     }
@@ -217,14 +245,14 @@ def render_markdown_report(
 ) -> str:
     ai_status = getattr(config, "ai_status_message", "AI triage disabled")
     ai_reason = getattr(config, "ai_disabled_reason", "")
-    scope_display = ", ".join(scope) if isinstance(scope, (list, tuple)) else _safe_text(scope)
+    scope_display = ", ".join(_report_safe_text(item) for item in scope) if isinstance(scope, (list, tuple)) else _report_safe_text(scope)
     md_lines = [
         "# GhillieSuite-EX Bug Bounty Report",
         "",
-        f"**Target:** `{target}`  ",
+        f"**Target:** `{_report_safe_text(target)}`  ",
         f"**Generated:** {generated_at.strftime('%Y-%m-%d %H:%M:%S UTC')}  ",
         f"**Scope:** {scope_display}  ",
-        f"**AI Triage:** {ai_status}" + (f" ({ai_reason})" if ai_reason else "") + "  ",
+        f"**AI Triage:** {_report_safe_text(ai_status)}" + (f" ({_report_safe_text(ai_reason)})" if ai_reason else "") + "  ",
         "",
         "---",
         "",
@@ -293,8 +321,8 @@ def render_markdown_report(
                 "```",
                 _report_safe_text(finding.evidence or "N/A"),
                 "```",
-                f"Evidence Request: `{req_path}`" if req_path else "",
-                f"Evidence Response: `{res_path}`" if res_path else "",
+                f"Evidence Request: `{_report_safe_text(req_path)}`" if req_path else "",
+                f"Evidence Response: `{_report_safe_text(res_path)}`" if res_path else "",
                 "",
                 "**Reproducible Steps:**",
                 "",
@@ -332,8 +360,8 @@ def render_markdown_report(
                 "```",
                 _report_safe_text(finding.evidence or "N/A"),
                 "```",
-                f"Evidence Request: `{req_path}`" if req_path else "",
-                f"Evidence Response: `{res_path}`" if res_path else "",
+                f"Evidence Request: `{_report_safe_text(req_path)}`" if req_path else "",
+                f"Evidence Response: `{_report_safe_text(res_path)}`" if res_path else "",
                 "",
                 "**Reproducible Steps:**",
                 "",
@@ -356,7 +384,7 @@ def render_markdown_report(
             "|--------|--------|------------|",
         ]
         for host in hosts:
-            md_lines.append(f"| `{host.domain}` | {host.status_code} | {host.tech_stack} |")
+            md_lines.append(f"| `{_report_safe_text(host.domain)}` | {host.status_code} | {_report_safe_text(host.tech_stack)} |")
         md_lines.append("")
 
     if screenshots:
@@ -367,7 +395,7 @@ def render_markdown_report(
             "|-----|------------------|--------|",
         ]
         for shot in screenshots:
-            md_lines.append(f"| `{shot.url}` | `{shot.path}` | {shot.status} |")
+            md_lines.append(f"| `{_report_safe_text(shot.url)}` | `{_report_safe_text(shot.path)}` | {shot.status} |")
         md_lines.append("")
 
     return "\n".join(line for line in md_lines if line is not None)
@@ -396,6 +424,7 @@ class HtmlReporter:
         target: str,
         scope: list[str],
         output_dir: str | Path = "reports",
+        base_name: str | None = None,
     ) -> Path:
         """
         Query the DB, enrich findings with AI summaries, render HTML, write to disk.
@@ -404,9 +433,11 @@ class HtmlReporter:
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
 
-        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        safe_target = target.replace(".", "_").replace("/", "_").replace(":", "")
-        html_path = output_path / f"{safe_target}_{ts}.html"
+        safe_target = (
+            re.sub(r"[^A-Za-z0-9_-]+", "_", base_name).strip("_")[:160]
+            if base_name else safe_run_slug(target, datetime.now(timezone.utc))
+        ) or "report"
+        html_path = output_path / f"{safe_target}.html"
 
         try:
             findings: list[Finding] = await self.db.get_findings()
@@ -432,6 +463,10 @@ class HtmlReporter:
             self.console.print(f"[yellow]  ⚠ Failed to load screenshots: {exc}[/yellow]")
             screenshots = []
 
+        findings, hosts, endpoints, screenshots = filter_report_records(
+            scope, findings, hosts, endpoints, screenshots,
+        )
+
         if getattr(self.cfg, "ai_enabled", False) and self.ai is not None:
             self.console.print(f"[cyan]  Generating AI summaries for {len(findings)} finding(s)…[/cyan]")
         else:
@@ -450,15 +485,15 @@ class HtmlReporter:
             "execution_profile": getattr(self.cfg, "execution_profile", "balanced"),
             "force_exploit": bool(getattr(self.cfg, "force_exploit", False)),
             "generate_bounty_draft": bool(getattr(self.cfg, "generate_bounty_draft", False)),
-            "ai_triage_status": getattr(self.cfg, "ai_status_message", "AI triage disabled"),
-            "ai_triage_reason": getattr(self.cfg, "ai_disabled_reason", ""),
+            "ai_triage_status": _report_safe_text(getattr(self.cfg, "ai_status_message", "AI triage disabled")),
+            "ai_triage_reason": _report_safe_text(getattr(self.cfg, "ai_disabled_reason", "")),
         }
 
         screenshots_render = [
             {
-                "url": s.url,
-                "path": s.path,
-                "title": s.title,
+                "url": _report_safe_text(s.url),
+                "path": _report_safe_text(s.path),
+                "title": _report_safe_text(s.title),
                 "status": s.status,
                 "data_uri": _image_data_uri(s.path),
             }
@@ -513,7 +548,7 @@ class HtmlReporter:
         high_count = sum(1 for f in high_critical if f.get("severity", "").lower() == "high")
 
         email_draft = [
-            f"Subject: Multiple Security Vulnerabilities Report - {target}\n",
+            f"Subject: Multiple Security Vulnerabilities Report - {_report_safe_text(target)}\n",
             "Hello Security Team,\n",
             "My name is [Your Name/Handle], an independent security researcher. During a routine security assessment on your infrastructure, I discovered multiple security vulnerabilities that require your attention. I am practicing Responsible Disclosure and keeping this confidential.\n",
             "--- FINDINGS SUMMARY ---",
@@ -552,7 +587,7 @@ class HtmlReporter:
             evidence = evidence.strip()
             # If the json rescue gave us empty brackets or it's still missing
             if not evidence or evidence in ("{}", "[{}]", "[]"):
-                evidence = "Payload successfully injected at the target endpoint."
+                evidence = "Evidence unavailable; validate this finding manually before submission."
 
             if len(evidence) > 300:
                 evidence = evidence[:300].strip() + "\n... [TRUNCATED]"
@@ -574,7 +609,7 @@ class HtmlReporter:
         )
 
         try:
-            draft_content = "\n".join(email_draft)
+            draft_content = redact_text("\n".join(email_draft))
             draft_path.write_text(draft_content.strip(), encoding="utf-8")
             self.console.print(f"  Draft: [underline]{draft_path.resolve()}[/underline]")
         except Exception as e:
@@ -635,13 +670,13 @@ class HtmlReporter:
                 "reproducible_steps": safe_steps,
                 "raw_output":         safe_raw,
                 "timestamp":          safe_timestamp,
-                "what_is_it":         title_cache[safe_title].get("what_is_it", ""),
-                "impact":             title_cache[safe_title].get("impact", ""),
-                "remediation":        title_cache[safe_title].get("remediation", ""),
+                "what_is_it":         _report_safe_text(title_cache[safe_title].get("what_is_it", "")),
+                "impact":             _report_safe_text(title_cache[safe_title].get("impact", "")),
+                "remediation":        _report_safe_text(title_cache[safe_title].get("remediation", "")),
                 "host_status":        host_status,
-                "host_tech":          host_tech,
-                "evidence_request_path": req_path,
-                "evidence_response_path": res_path,
+                "host_tech":          _report_safe_text(host_tech),
+                "evidence_request_path": _report_safe_text(req_path),
+                "evidence_response_path": _report_safe_text(res_path),
                 "evidence_request": req_text,
                 "evidence_response": res_text,
             })
@@ -679,7 +714,7 @@ Reply with a JSON object containing exactly these three keys:
 """
         if not getattr(self.cfg, "ai_enabled", False) or self.ai is None:
             return {
-                "what_is_it": f"A {f.severity}-severity vulnerability detected by {f.tool}.",
+                "what_is_it": f"A {severity}-severity vulnerability detected by {tool}.",
                 "impact": "AI triage disabled. Review the technical evidence for impact assessment.",
                 "remediation": "Review the evidence and reproducible steps below and apply appropriate fixes.",
             }
@@ -708,7 +743,10 @@ Reply with a JSON object containing exactly these three keys:
             start = raw.find("{")
             end   = raw.rfind("}") + 1
             if start >= 0 and end > start:
-                return json.loads(raw[start:end])
+                parsed = json.loads(raw[start:end])
+                if isinstance(parsed, dict):
+                    return {key: _report_safe_text(parsed.get(key, ""))
+                            for key in ("what_is_it", "impact", "remediation")}
         except Exception as exc:
             if getattr(self.cfg, "ai_enabled", False):
                 self.cfg.disable_ai(f"{type(exc).__name__}: {exc}")
@@ -716,7 +754,7 @@ Reply with a JSON object containing exactly these three keys:
 
         # Graceful fallback
         return {
-            "what_is_it": f"A {f.severity}-severity vulnerability detected by {f.tool}.",
+            "what_is_it": f"A {severity}-severity vulnerability detected by {tool}.",
             "impact":      "AI triage disabled. Review the technical evidence to confirm business impact.",
             "remediation": "Review the evidence and reproducible steps below and apply appropriate fixes.",
         }
@@ -726,7 +764,7 @@ Reply with a JSON object containing exactly these three keys:
 
 def _e(s: Any) -> str:
     """HTML-escape a value for safe inclusion in the template."""
-    return _html.escape(_safe_text(s), quote=True)
+    return _html.escape(_report_safe_text(s), quote=True)
 
 
 
@@ -767,7 +805,7 @@ def _render_html(
 
     js_config = js_config or {}
     execution_flags = execution_flags or {}
-    scope_display = ", ".join(_safe_text(item) for item in scope)
+    scope_display = ", ".join(_report_safe_text(item) for item in scope)
 
     screenshot_section = (
         f"""

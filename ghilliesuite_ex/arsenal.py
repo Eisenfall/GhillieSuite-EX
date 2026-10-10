@@ -26,7 +26,9 @@ FILE I/O:
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import shutil
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -386,6 +388,8 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         base_cmd=[
             "katana", "-u", "{target}",
             "-silent",
+            "-fs", "fqdn",
+            "-dr",
             "-d", "{katana_depth}",  # depth injected by build_command from cfg.katana_depth
             "-jc",                    # parse inline JS
             "-j",                     # JSONL output format (richer metadata: method, source, params)
@@ -472,7 +476,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         scope_flag="-u {target}",
         category="VulnScan",
         parser="nuclei",
-        hitl_required=False,  # HitL only for critical findings — handled in ExploitAgent
+        hitl_required=True,
         description=(
             "Template-based vulnerability scanner. "
             "Tags: cve,sqli,xss,lfi,ssrf,rce,ssti,xxe + more high-signal BB tags. "
@@ -600,7 +604,7 @@ def build_command(
     
     # Context-Aware Smart Wordlist Selection
     wl_str = wordlist
-    if not wl_str:
+    if tool_name == "ffuf" and not wl_str:
         tech = tech_stack.lower()
         if any(kw in tech for kw in ("php", "laravel", "symfony")):
             wl_str = _write_temp_wordlist("php", _PHP_WORDLIST)
@@ -610,6 +614,8 @@ def build_command(
             wl_str = _write_temp_wordlist("node", _NODEJS_WORDLIST)
         else:
             wl_str = _BUNDLED_WORDLIST
+    elif not wl_str:
+        wl_str = _BUNDLED_WORDLIST
 
     # Resolve Katana config placeholders before building cmd
     katana_depth_val = "6"
@@ -700,15 +706,8 @@ def build_command(
         except Exception:
             pass
 
-    if allow_redirects is None:
-        try:
-            from ghilliesuite_ex.config import cfg as _cfg
-            allow_redirects = bool(getattr(_cfg, "allow_redirects", False))
-        except Exception:
-            allow_redirects = False
-
-    if allow_redirects and tool_name == "httpx" and "-follow-redirects" not in cmd:
-        cmd.append("-follow-redirects")
+    # Keep the argument for callers, but do not enable automatic redirects:
+    # the destination cannot be checked against scope before httpx requests it.
 
     if stealth is None:
         try:
@@ -774,12 +773,20 @@ def build_command(
 
 
 def _write_temp_wordlist(name: str, payload_list: list[str]) -> str:
-    """Helper to write a dynamic wordlist to tmp/ and return its path."""
+    """Write an immutable, content-addressed wordlist atomically."""
     tmp_dir = Path("tmp")
     tmp_dir.mkdir(parents=True, exist_ok=True)
-    out_path = tmp_dir / f"wordlist_{name}.txt"
-    if not out_path.exists():
-        out_path.write_text("\n".join(payload_list), encoding="utf-8")
+    content = "\n".join(payload_list).encode("utf-8")
+    digest = hashlib.sha256(content).hexdigest()[:16]
+    out_path = tmp_dir / f"wordlist_{name}_{digest}.txt"
+    if not out_path.exists() or out_path.read_bytes() != content:
+        with tempfile.NamedTemporaryFile(dir=tmp_dir, prefix="wordlist_", delete=False) as tmp_file:
+            temp_path = Path(tmp_file.name)
+            tmp_file.write(content)
+        try:
+            temp_path.replace(out_path)
+        finally:
+            temp_path.unlink(missing_ok=True)
     return str(out_path)
 
 

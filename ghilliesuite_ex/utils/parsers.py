@@ -713,14 +713,14 @@ def parse_subzy(output: str = "", output_path: Path | None = None) -> list[dict[
                 status = data.get("status") or data.get("result") or ""
                 # FIXED: extract service field from JSON data (P2 fix)
                 service = data.get("service") or data.get("provider") or data.get("fingerprint") or ""
-                vuln = bool(data.get("vulnerable") or ("vulnerable" in status.lower()))
+                vuln = data.get("vulnerable") is True or bool(re.search(r"(?<!not )\bvulnerable\b", status, re.I))
                 if domain:
                     results.append({"domain": domain, "status": status, "service": service, "vulnerable": vuln})
                 continue
             except json.JSONDecodeError:
                 pass
         upper = line.upper()
-        if "VULNERABLE" in upper:
+        if re.search(r"(?<!NOT )\bVULNERABLE\b", upper):
             m = re.search(r"([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})", line)
             if m:
                 results.append({"domain": m.group(1), "status": "VULNERABLE", "service": "", "vulnerable": True})

@@ -19,8 +19,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from ipaddress import ip_address, ip_network
 from pathlib import Path
+import posixpath
 from typing import Any
-from urllib.parse import SplitResult, urlsplit, urlunsplit
+from urllib.parse import SplitResult, unquote, urlsplit, urlunsplit
 
 
 @dataclass(frozen=True)
@@ -167,6 +168,11 @@ def filter_in_scope(targets: list[str], scope: ScopeSpec | list[str]) -> list[st
     return [t for t in targets if is_in_scope(t, scope)]
 
 
+def scope_has_url_rules(scope: ScopeSpec | list[str]) -> bool:
+    """Whether scope includes path rules that whole-site scanners cannot enforce."""
+    return any(rule.kind == "url_prefix" for rule in _coerce_scope_spec(scope).rules)
+
+
 def _coerce_scope_spec(scope: ScopeSpec | list[str]) -> ScopeSpec:
     if isinstance(scope, ScopeSpec):
         return scope
@@ -223,17 +229,44 @@ def _normalize_host_literal(value: str) -> str:
 
 
 def _normalize_url_prefix(value: str) -> str:
-    parsed = urlsplit(value.strip())
-    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+    normalized = _canonical_url(value)
+    if normalized is None:
         raise ValueError(f"Invalid URL scope prefix: '{value}'. Use a full http/https URL.")
-    normalized = SplitResult(
-        scheme=parsed.scheme.lower(),
-        netloc=parsed.netloc.lower(),
-        path=parsed.path or "/",
-        query=parsed.query,
-        fragment="",
-    )
-    return urlunsplit(normalized)
+    return normalized
+
+
+def _canonical_url(value: str) -> str | None:
+    try:
+        parsed = urlsplit(value.strip())
+        scheme = parsed.scheme.lower()
+        host = (parsed.hostname or "").lower().rstrip(".")
+        port = parsed.port
+    except ValueError:
+        return None
+    if scheme not in {"http", "https"} or not host or parsed.username or parsed.password:
+        return None
+    if port == {"http": 80, "https": 443}[scheme]:
+        port = None
+    authority = f"[{host}]" if ":" in host else host
+    if port is not None:
+        authority += f":{port}"
+
+    path = parsed.path or "/"
+    # Scope decisions must reflect paths after ordinary URL decoding and dot
+    # removal, including encoded slashes and encoded dot segments.
+    for _ in range(4):
+        decoded = unquote(path)
+        if decoded == path:
+            break
+        path = decoded
+    if unquote(path) != path:
+        return None
+    path = path.replace("\\", "/")
+    trailing = path.endswith("/")
+    path = posixpath.normpath("/" + path.lstrip("/"))
+    if trailing and path != "/":
+        path += "/"
+    return urlunsplit(SplitResult(scheme, authority, path, parsed.query, ""))
 
 
 def _parse_target(target: str) -> ScopeTarget:
@@ -241,17 +274,8 @@ def _parse_target(target: str) -> ScopeTarget:
     parsed_url: str | None = None
 
     if "://" in raw:
-        parsed = urlsplit(raw)
-        host = (parsed.hostname or "").lower().rstrip(".")
-        parsed_url = urlunsplit(
-            SplitResult(
-                scheme=parsed.scheme.lower(),
-                netloc=parsed.netloc.lower(),
-                path=parsed.path or "/",
-                query=parsed.query,
-                fragment="",
-            )
-        )
+        parsed_url = _canonical_url(raw)
+        host = (urlsplit(parsed_url).hostname or "") if parsed_url else ""
     else:
         pseudo = urlsplit(f"//{raw}")
         host = (pseudo.hostname or raw.split("/", 1)[0]).lower().rstrip(".")
@@ -274,7 +298,16 @@ def _rule_matches(rule: ScopeRule, target: ScopeTarget) -> bool:
     if rule.kind == "host_wildcard":
         return target.host.endswith("." + rule.value) and target.host != rule.value
     if rule.kind == "url_prefix":
-        return target.normalized_url is not None and target.normalized_url.startswith(rule.value)
+        if target.normalized_url is None:
+            return False
+        prefix = urlsplit(rule.value)
+        candidate = urlsplit(target.normalized_url)
+        if (candidate.scheme, candidate.netloc) != (prefix.scheme, prefix.netloc):
+            return False
+        base = prefix.path.rstrip("/") or "/"
+        path = candidate.path
+        path_match = path == base or path.startswith(base.rstrip("/") + "/")
+        return path_match and (not prefix.query or candidate.query == prefix.query)
     if rule.kind == "cidr":
         return target.ip is not None and target.ip in rule.value
     return False

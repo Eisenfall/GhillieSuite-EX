@@ -1,5 +1,6 @@
 import unittest
 import shutil
+import sqlite3
 from pathlib import Path
 from uuid import uuid4
 
@@ -9,6 +10,39 @@ from ghilliesuite_ex.utils.scope import load_scope
 
 
 class TestServicesDB(unittest.IsolatedAsyncioTestCase):
+    async def test_endpoint_method_and_params_are_preserved(self) -> None:
+        async with StateDB(":memory:", target="example.com") as db:
+            url = "https://example.com/api/items"
+            await db.insert_endpoint(Endpoint(url=url, method="GET", params="id"))
+            await db.insert_endpoint(Endpoint(url=url, method="POST", params="id"))
+            await db.insert_endpoint(Endpoint(url=url, method="GET", params="page"))
+            rows = await db.get_endpoints()
+        self.assertEqual(len(rows), 2)
+        by_method = {row.method: row.params for row in rows}
+        self.assertEqual(by_method, {"GET": "id,page", "POST": "id"})
+
+    async def test_old_url_unique_endpoint_schema_is_migrated(self) -> None:
+        tmp_dir = Path("tmp") / f"endpoint_migration_{uuid4().hex}"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            db_path = tmp_dir / "old.db"
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    "CREATE TABLE endpoints (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                    "url TEXT NOT NULL UNIQUE, method TEXT DEFAULT 'GET', params TEXT DEFAULT '', "
+                    "source_tool TEXT DEFAULT '', host_id INTEGER, found_at TEXT NOT NULL)"
+                )
+                conn.execute(
+                    "INSERT INTO endpoints(url, method, params, found_at) VALUES (?, ?, ?, ?)",
+                    ("https://example.com/api", "GET", "id", "2026-01-01"),
+                )
+            async with StateDB(str(db_path), target="example.com") as db:
+                await db.insert_endpoint(Endpoint(url="https://example.com/api", method="POST", params="id"))
+                rows = await db.get_endpoints()
+            self.assertEqual({row.method for row in rows}, {"GET", "POST"})
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
     async def test_insert_and_get_services(self) -> None:
         async with StateDB(":memory:", target="example.com") as db:
             host_id = await db.insert_host(Host(domain="example.com"))

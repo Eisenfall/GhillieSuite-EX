@@ -16,8 +16,10 @@ from rich.rule import Rule
 from ghilliesuite_ex.utils.reporter import (
     HtmlReporter,
     build_report_data,
+    filter_report_records,
     render_markdown_report,
 )
+from ghilliesuite_ex.utils.run_metadata import safe_run_slug
 from ghilliesuite_ex.utils.ui import findings_table
 
 from .base import AgentResult, AgentTask, BaseAgent
@@ -32,6 +34,9 @@ class ReporterAgent(BaseAgent):
         hosts = await self.db.get_hosts()
         endpoints = await self.db.get_endpoints()
         screenshots = await self.db.get_screenshots()
+        findings, hosts, endpoints, screenshots = filter_report_records(
+            self.scope, findings, hosts, endpoints, screenshots,
+        )
 
         if not findings:
             findings_table(self.console, findings)
@@ -51,9 +56,7 @@ class ReporterAgent(BaseAgent):
         output_dir.mkdir(parents=True, exist_ok=True)
 
         now_utc = datetime.now(timezone.utc)
-        ts = now_utc.strftime("%Y%m%d_%H%M%S")
-        safe_target = target.replace(".", "_").replace("/", "_").replace(":", "")
-        base_name = f"{safe_target}_{ts}"
+        base_name = safe_run_slug(target, now_utc)
 
         json_path = output_dir / f"{base_name}.json"
         report_data = build_report_data(
@@ -107,6 +110,7 @@ class ReporterAgent(BaseAgent):
                 target=target,
                 scope=self.scope,
                 output_dir=output_dir,
+                base_name=base_name,
             )
             self.console.print(f"  HTML: [underline]{html_path.resolve()}[/underline]")
         except Exception as exc:

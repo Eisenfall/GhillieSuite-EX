@@ -200,7 +200,7 @@ class TestExploitValidationAuthAware(unittest.IsolatedAsyncioTestCase):
             init_kwargs = dict(_RecordingAsyncClient.last_init_kwargs or {})
             self.assertEqual(init_kwargs.get("proxy"), "http://127.0.0.1:8080")
             self.assertEqual(init_kwargs.get("timeout"), 5.0)
-            self.assertTrue(init_kwargs.get("follow_redirects"))
+            self.assertFalse(init_kwargs.get("follow_redirects"))
 
             headers = dict(init_kwargs.get("headers") or {})
             self.assertEqual(headers.get("Authorization"), "Bearer token123")
@@ -374,7 +374,7 @@ class TestExploitValidationAuthAware(unittest.IsolatedAsyncioTestCase):
 
         finding = Finding(
             tool="trufflehog",
-            target="github:example",
+            target="example.com",
             severity="high",
             title="Leaked Secret in GitHub Source - AWS Access Key",
             evidence=(

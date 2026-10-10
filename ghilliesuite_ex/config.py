@@ -335,7 +335,7 @@ class Config:
         default_factory=lambda: frozenset({"sqlmap", "dalfox"})
     )
 
-    # ── Nuclei severities that also trigger HitL
+    # ── Retained for config compatibility; nuclei approval happens before scanning.
     nuclei_hitl_severities: frozenset[str] = field(
         default_factory=lambda: frozenset({"critical"})
     )
