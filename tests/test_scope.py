@@ -40,6 +40,21 @@ class TestScopeRules(unittest.TestCase):
         self.assertTrue(is_in_scope("https://example.com/public/info", scope))
         self.assertFalse(is_in_scope("https://example.com/private/report", scope))
 
+    def test_url_rules_normalize_default_ports_and_path_segments(self) -> None:
+        scope = load_scope("url:https://example.com/api/,exclude-url:https://example.com/api/private/")
+        self.assertTrue(is_in_scope("https://EXAMPLE.com:443/api/users", scope))
+        self.assertFalse(is_in_scope("https://example.com:443/api/../admin", scope))
+        self.assertFalse(is_in_scope("https://example.com/api/%2e%2e/admin", scope))
+        self.assertFalse(is_in_scope("https://example.com/api/private/../private/secret", scope))
+        self.assertFalse(is_in_scope("https://example.com/apix/users", scope))
+        self.assertFalse(is_in_scope("https://example.com:444/api/users", scope))
+        self.assertFalse(is_in_scope("https://example.com/api/%252525252e%252525252e/admin", scope))
+
+    def test_url_rule_matches_base_path_without_trailing_slash(self) -> None:
+        scope = load_scope("url:https://example.com/api/")
+        self.assertTrue(is_in_scope("https://example.com/api", scope))
+        self.assertTrue(is_in_scope("https://example.com/api/", scope))
+
     def test_cidr_rules(self) -> None:
         scope = load_scope("cidr:10.10.10.0/24,exclude-cidr:10.10.10.128/25")
         self.assertTrue(is_in_scope("10.10.10.42", scope))

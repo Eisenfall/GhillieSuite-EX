@@ -64,6 +64,11 @@ class TestToolParsers(unittest.TestCase):
         self.assertEqual(res[0]["domain"], "a.example.com")
         self.assertTrue(res[0]["vulnerable"])
 
+    def test_parse_subzy_negative_status_is_not_vulnerable(self) -> None:
+        text = '{"domain":"safe.example.com","status":"not vulnerable"}\n'
+        text += "[NOT VULNERABLE] safe.example.com\n"
+        self.assertTrue(all(not row["vulnerable"] for row in parse_subzy(output=text)))
+
     def test_parse_gowitness_json(self) -> None:
         text = '[{"url":"https://example.com","screenshot":"shot.png","title":"Home","status":200}]'
         res = parse_gowitness(output=text)

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from urllib.parse import urlsplit
 
-from ghilliesuite_ex.utils.scope import filter_in_scope, is_in_scope
+from ghilliesuite_ex.utils.scope import ScopeSpec, filter_in_scope, is_in_scope, scope_has_url_rules
 
 _ARJUN_STATIC_EXTS = (
     ".jpg", ".jpeg", ".png", ".gif", ".svg", ".webp",
@@ -33,22 +33,34 @@ def dedupe_preserve_order(values: list[str]) -> list[str]:
     return deduped
 
 
-def build_httpx_targets(subdomains: list[str], scope: list[str]) -> list[str]:
+def build_httpx_targets(subdomains: list[str], scope: list[str], root_target: str = "") -> list[str]:
     targets: list[str] = []
+    if root_target.startswith(("http://", "https://")):
+        targets.append(root_target)
+    elif root_target:
+        targets.extend((f"http://{root_target}", f"https://{root_target}"))
     for domain in subdomains:
         targets.append(f"http://{domain}")
         targets.append(f"https://{domain}")
     return dedupe_preserve_order(filter_in_scope(targets, scope))
 
 
-def build_katana_candidates(live_urls: list[str]) -> list[str]:
+def build_katana_candidates(live_urls: list[str], scope: list[str] | None = None) -> list[str]:
     candidates: list[str] = []
     for url in live_urls:
         parsed = urlsplit(url)
         if not parsed.scheme or not parsed.netloc:
             continue
-        candidates.append(f"{parsed.scheme}://{parsed.netloc}")
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        seed = origin if scope is None or is_in_scope(origin, scope) else url
+        if scope is None or is_in_scope(seed, scope):
+            candidates.append(seed)
     return dedupe_preserve_order(candidates)
+
+
+def katana_crawl_safe_for_scope(scope: ScopeSpec | list[str]) -> bool:
+    """Katana's host/redirect flags cannot enforce URL path exclusions."""
+    return not scope_has_url_rules(scope)
 
 
 def select_katana_targets(

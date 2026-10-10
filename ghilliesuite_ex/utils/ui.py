@@ -20,6 +20,7 @@ from rich.table import Table
 from rich.text import Text
 
 from ghilliesuite_ex import __version__
+from ghilliesuite_ex.utils.redaction import redact_command, redact_text
 
 # ── Severity colour map ───────────────────────────────────────────────────────
 SEVERITY_COLORS = {
@@ -98,11 +99,11 @@ def tool_result_panel(
 ) -> None:
     """Print a compact result panel after a tool finishes."""
     status = "[green]✔ success[/green]" if ok else "[red]✘ error[/red]"
-    cmd_str = " ".join(cmd)
+    cmd_str = redact_command(cmd)
     content = (
         f"[bold]{tool_name}[/bold]  {status}\n"
         f"[dim]$ {cmd_str[:120]}[/dim]\n\n"
-        f"{summary}"
+        f"{redact_text(summary)}"
     )
     console.print(Panel(content, border_style="dim", padding=(0, 2)))
 
@@ -116,7 +117,7 @@ def hitl_prompt(
     """
     Human-in-the-Loop confirmation prompt.
 
-    Displays the exact command the AI wants to run and the AI's reasoning,
+    Displays the command with credentials masked and the AI's reasoning,
     then asks for explicit [Y/n] confirmation.
 
     Returns:
@@ -126,11 +127,11 @@ def hitl_prompt(
     console.print()
     console.print(Rule("[bold yellow]⚠  Human-in-the-Loop Required[/bold yellow]", style="yellow"))
 
-    cmd_str = " ".join(cmd)
+    cmd_str = redact_command(cmd)
     content = (
         f"[bold yellow]Tool:[/bold yellow]     {tool_name}\n"
         f"[bold yellow]Command:[/bold yellow]  [bright_white]$ {cmd_str}[/bright_white]\n\n"
-        f"[bold yellow]AI Reasoning:[/bold yellow]\n{reason}"
+        f"[bold yellow]AI Reasoning:[/bold yellow]\n{redact_text(reason)}"
     )
     console.print(
         Panel(content, border_style="yellow", title="[yellow]Exploitation Approval[/yellow]", padding=(1, 2))

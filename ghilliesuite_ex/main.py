@@ -184,7 +184,7 @@ def hunt(
     allow_redirects: bool = typer.Option(
         False,
         "--allow-redirects",
-        help="Allow httpx to follow redirects during recon probing.",
+        help="Compatibility flag; automatic redirects stay disabled so recon remains in scope.",
         is_flag=True,
     ),
     disable_stealth: bool = typer.Option(
@@ -505,6 +505,8 @@ async def _async_hunt(
 
     # ── Banner ─────────────────────────────────────────────────────────────
     print_banner(console)
+    if allow_redirects:
+        console.print("[yellow]Automatic redirects are disabled to keep requests within scope.[/yellow]")
 
     # ── Auto-detect AI provider + validate ────────────────────────────────
     ai_status_logged = False
@@ -602,9 +604,6 @@ async def _async_hunt(
             "[dim]  waf-evasion hardening remains active across profiles (mutation probes removed).[/dim]"
         )
 
-    if allow_redirects:
-        console.print("[bold yellow]Redirects enabled[/bold yellow]  [dim]— httpx will follow redirects[/dim]")
-
     if stealth:
         console.print("[bold yellow]Stealth mode enabled[/bold yellow]  [dim]— lower request rate & concurrency[/dim]")
 
@@ -646,18 +645,16 @@ async def _async_hunt(
             "[dim]— auth credentials will be injected into httpx, katana, nuclei, dalfox, sqlmap[/dim]"
         )
         if cfg.auth_cookie:
-            preview = cfg.auth_cookie[:40] + "…" if len(cfg.auth_cookie) > 40 else cfg.auth_cookie
-            console.print(f"    [dim]Cookie : {preview}[/dim]")
+            console.print("    [dim]Cookie configured[/dim]")
         if cfg.auth_header:
-            preview = cfg.auth_header[:60] + "…" if len(cfg.auth_header) > 60 else cfg.auth_header
-            console.print(f"    [dim]Header : {preview}[/dim]")
+            console.print("    [dim]Authorization header configured[/dim]")
         console.print()
 
     # ── Force-auto mode ────────────────────────────────────────────────────
     if force_auto:
         console.print(
             "[bold red]⚠️  FORCE-AUTO MODE ACTIVE — All HitL prompts bypassed.[/bold red]\n"
-            "[dim]   dalfox, sqlmap, and ffuf SSRF will fire without confirmation.\n"
+            "[dim]   Active scanners may run without confirmation.\n"
             "   Only use on targets you are explicitly, legally authorised to test.[/dim]"
         )
         console.print()
@@ -765,28 +762,34 @@ async def _async_hunt(
         try:
             result = await supervisor.run(task)
             result_summary = result.summary
+            if result.status == "error":
+                failure_stage = "agent_runtime"
         except Exception as _agent_exc:
             failure_stage = "agent_runtime"
             console.print(
                 f"\n[bold red]⚠ Agent swarm encountered an unhandled error:[/bold red]\n"
                 f"  [red]{_agent_exc}[/red]\n"
-                f"[dim]Continuing to report generation with findings collected so far.[/dim]"
+                f"[dim]Partial database results were preserved.[/dim]"
             )
             result_summary = (
                 f"Agent swarm encountered an unhandled error but preserved partial results: {_agent_exc}"
             )
 
+        from ghilliesuite_ex.utils.scope import is_in_scope
         counts = {
-            "hosts": len(await db.get_hosts()),
-            "endpoints": len(await db.get_endpoints()),
-            "findings": len(await db.get_findings()),
-            "screenshots": len(await db.get_screenshots()),
+            "hosts": len(await db.get_hosts(scope_domains=scope_domains)),
+            "endpoints": sum(is_in_scope(ep.url, scope_domains) for ep in await db.get_endpoints()),
+            "findings": sum(is_in_scope(f.target, scope_domains) for f in await db.get_findings()),
+            "screenshots": sum(is_in_scope(s.url, scope_domains) for s in await db.get_screenshots()),
         }
 
-    console.print(f"\n[bold bright_green]Hunt complete! {result_summary}[/bold bright_green]")
+    if failure_stage:
+        console.print(f"\n[bold red]Hunt finished with errors. {result_summary}[/bold red]")
+    else:
+        console.print(f"\n[bold bright_green]Hunt complete! {result_summary}[/bold bright_green]")
     final_status = "completed_with_errors" if failure_stage else "completed"
     _write_manifest(final_status, result_summary)
-    return True
+    return not failure_stage
 def _build_ai_client(config):
     """
     Construct the AI client using the auto-detected provider stored in cfg.
